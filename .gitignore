@@ -1,3 +1,4 @@
 node_modules/
 tmp/
 *.log
+webapp/.next/\nwebapp/next-env.d.ts

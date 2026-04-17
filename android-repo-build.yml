@@ -1,0 +1,118 @@
+# ============================================================
+# Android Build Workflow — install this file inside any
+# Android repo at .github/workflows/android-build.yml
+# Triggered remotely by the Android CI Dashboard app.
+# ============================================================
+name: Android Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Artifact to produce'
+        required: true
+        type: choice
+        options: [apk, aab, both]
+        default: apk
+      sign_release:
+        description: 'Sign with keystore (requires KEYSTORE_* secrets)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: "Build Android (${{ github.event.inputs.build_type }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      # ── Source ─────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── JDK ────────────────────────────────────────────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      # ── Gradle cache ───────────────────────────────────────────────────────
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # ── Executable permission ───────────────────────────────────────────────
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      # ── Keystore (optional) ────────────────────────────────────────────────
+      - name: Decode keystore
+        if: ${{ github.event.inputs.sign_release == 'true' && secrets.KEYSTORE_FILE != '' }}
+        env:
+          KEYSTORE_FILE:  ${{ secrets.KEYSTORE_FILE }}
+          KEYSTORE_PASS:  ${{ secrets.KEYSTORE_PASS }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          KEY_PASS:       ${{ secrets.KEY_PASS }}
+        run: |
+          echo "$KEYSTORE_FILE" | base64 --decode > app/release.jks
+          cat >> local.properties <<EOF
+          signing.storeFile=release.jks
+          signing.storePassword=$KEYSTORE_PASS
+          signing.keyAlias=$KEYSTORE_ALIAS
+          signing.keyPassword=$KEY_PASS
+          EOF
+
+      # ── APK ────────────────────────────────────────────────────────────────
+      - name: Build APK (debug)
+        if: ${{ github.event.inputs.build_type == 'apk' || github.event.inputs.build_type == 'both' }}
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        if: ${{ github.event.inputs.build_type == 'apk' || github.event.inputs.build_type == 'both' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ github.run_number }}
+          path: |
+            app/build/outputs/apk/**/*.apk
+            **/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      # ── AAB ────────────────────────────────────────────────────────────────
+      - name: Build AAB (release)
+        if: ${{ github.event.inputs.build_type == 'aab' || github.event.inputs.build_type == 'both' }}
+        run: ./gradlew bundleRelease --no-daemon --stacktrace
+
+      - name: Upload AAB
+        if: ${{ github.event.inputs.build_type == 'aab' || github.event.inputs.build_type == 'both' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: aab-${{ github.run_number }}
+          path: |
+            app/build/outputs/bundle/**/*.aab
+            **/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+          retention-days: 7
+
+      # ── Summary ────────────────────────────────────────────────────────────
+      - name: Write summary
+        if: always()
+        run: |
+          echo "## Android Build ${{ job.status == 'success' && '✅' || '❌' }}" >> $GITHUB_STEP_SUMMARY
+          echo "| | |"                          >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"                        >> $GITHUB_STEP_SUMMARY
+          echo "| Type | \`${{ github.event.inputs.build_type }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Signed | \`${{ github.event.inputs.sign_release }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
