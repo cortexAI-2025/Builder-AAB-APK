@@ -104,14 +104,20 @@ jobs:
           echo "GIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
       # ── Keystore decode (optional) ────────────────────────────────────────────
+      # Note: secrets context is not available in `if:` expressions.
+      # The check is done inside the shell script instead.
       - name: Decode keystore
-        if: ${{ github.event.inputs.sign_release == 'true' && secrets.KEYSTORE_FILE != '' }}
+        if: ${{ github.event.inputs.sign_release == 'true' }}
         env:
           KEYSTORE_FILE:  ${{ secrets.KEYSTORE_FILE }}
           KEYSTORE_PASS:  ${{ secrets.KEYSTORE_PASS }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
           KEY_PASS:       ${{ secrets.KEY_PASS }}
         run: |
+          if [[ -z "$KEYSTORE_FILE" ]]; then
+            echo "⚠️  sign_release=true but KEYSTORE_FILE secret is not configured — skipping signing."
+            exit 0
+          fi
           echo "$KEYSTORE_FILE" | base64 --decode > ${{ needs.validate.outputs.module }}/release.jks
           cat >> local.properties <<EOF
           signing.storeFile=release.jks
