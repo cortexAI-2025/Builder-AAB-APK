@@ -3,10 +3,12 @@ import { getOctokit }               from '@/lib/github';
 import { readFileSync }             from 'fs';
 import path                         from 'path';
 
-// The template is committed alongside this app at the repo root.
-const TEMPLATE_PATH = path.join(process.cwd(), '../android-repo-build.yml');
+const WORKFLOW_FILENAME = 'mobixbuild.yml';
 
-// POST /api/workflow/install — commit android-build.yml into a target repo
+// Template is the mobixbuild.yml committed at .github/workflows/ in this repo.
+const TEMPLATE_PATH = path.join(process.cwd(), '../.github/workflows/mobixbuild.yml');
+
+// POST /api/workflow/install — commit mobixbuild.yml into a target repo
 export async function POST(req: NextRequest) {
   const { owner, repo } = await req.json() as { owner: string; repo: string };
 
@@ -17,19 +19,19 @@ export async function POST(req: NextRequest) {
   try {
     const octokit = await getOctokit();
 
-    // Read the workflow template
+    // Read the MobixBuild workflow template
     let content: string;
     try {
       content = readFileSync(TEMPLATE_PATH, 'utf8');
     } catch {
-      return NextResponse.json({ error: 'Workflow template not found on server' }, { status: 500 });
+      return NextResponse.json({ error: 'MobixBuild workflow template not found on server' }, { status: 500 });
     }
 
-    // Check if file already exists (need its SHA to update)
+    // Check if file already exists (need its SHA to update rather than create)
     let sha: string | undefined;
     try {
       const existing = await octokit.repos.getContent({
-        owner, repo, path: '.github/workflows/android-build.yml',
+        owner, repo, path: `.github/workflows/${WORKFLOW_FILENAME}`,
       });
       const data = existing.data as { sha: string };
       sha = data.sha;
@@ -38,8 +40,8 @@ export async function POST(req: NextRequest) {
     await octokit.repos.createOrUpdateFileContents({
       owner,
       repo,
-      path:    '.github/workflows/android-build.yml',
-      message: 'ci: add Android build workflow via Android CI Dashboard',
+      path:    `.github/workflows/${WORKFLOW_FILENAME}`,
+      message: 'ci: install MobixBuild workflow via Android CI Dashboard',
       content: Buffer.from(content).toString('base64'),
       ...(sha ? { sha } : {}),
     });
@@ -51,7 +53,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// GET /api/workflow/install?owner=&repo= — check workflow existence
+// GET /api/workflow/install?owner=&repo= — check if mobixbuild.yml exists in repo
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const owner = searchParams.get('owner') ?? '';
@@ -60,7 +62,7 @@ export async function GET(req: NextRequest) {
   try {
     const octokit = await getOctokit();
     await octokit.repos.getContent({
-      owner, repo, path: '.github/workflows/android-build.yml',
+      owner, repo, path: `.github/workflows/${WORKFLOW_FILENAME}`,
     });
     return NextResponse.json({ exists: true });
   } catch {

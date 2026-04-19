@@ -69,7 +69,7 @@ export async function workflowExists(
   try {
     await octokit.repos.getContent({
       owner, repo,
-      path: '.github/workflows/android-build.yml',
+      path: '.github/workflows/mobixbuild.yml',
     });
     return true;
   } catch {
@@ -77,7 +77,7 @@ export async function workflowExists(
   }
 }
 
-/** Get latest run for `android-build.yml` workflow. */
+/** Get latest run for `mobixbuild.yml` workflow. */
 export async function getLatestRun(
   octokit: Octokit,
   owner: string,
@@ -86,7 +86,7 @@ export async function getLatestRun(
   try {
     const { data } = await octokit.actions.listWorkflowRuns({
       owner, repo,
-      workflow_id: 'android-build.yml',
+      workflow_id: 'mobixbuild.yml',
       per_page:    1,
     });
     return (data.workflow_runs[0] as WorkflowRun) ?? null;

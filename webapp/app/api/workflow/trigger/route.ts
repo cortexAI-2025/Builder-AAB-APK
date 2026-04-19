@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
     await octokit.actions.createWorkflowDispatch({
       owner,
       repo,
-      workflow_id: 'android-build.yml',
+      workflow_id: 'mobixbuild.yml',
       ref,
       inputs: {
         build_type,

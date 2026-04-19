@@ -1,0 +1,198 @@
+# ╔══════════════════════════════════════════════════════════════╗
+# ║              MobixBuild — Android CI Workflow                ║
+# ║   Triggered by the Android CI Dashboard (workflow_dispatch)  ║
+# ╚══════════════════════════════════════════════════════════════╝
+#
+# Install this file in any Android repo at:
+#   .github/workflows/mobixbuild.yml
+#
+name: MobixBuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Artifact to produce"
+        required: true
+        type: choice
+        options: [apk, aab, both]
+        default: apk
+      sign_release:
+        description: "Sign with keystore (requires KEYSTORE_* secrets)"
+        required: false
+        type: boolean
+        default: false
+      build_variant:
+        description: "Gradle build variant (debug / release)"
+        required: false
+        type: choice
+        options: [debug, release]
+        default: debug
+      module:
+        description: "Gradle module to build (leave empty for :app)"
+        required: false
+        default: ""
+
+# Cancel any in-flight build on the same branch
+concurrency:
+  group: mobixbuild-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: "17"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true"
+
+jobs:
+  # ── Pre-check: validate inputs ──────────────────────────────────────────────
+  validate:
+    name: "Validate inputs"
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      module: ${{ steps.resolve.outputs.module }}
+    steps:
+      - name: Resolve module
+        id: resolve
+        run: |
+          MODULE="${{ github.event.inputs.module }}"
+          if [[ -z "$MODULE" ]]; then
+            echo "module=app" >> "$GITHUB_OUTPUT"
+          else
+            echo "module=$MODULE" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Main build job ───────────────────────────────────────────────────────────
+  build:
+    name: "MobixBuild · ${{ github.event.inputs.build_type }} · ${{ github.event.inputs.build_variant }}"
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 60
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── JDK ──────────────────────────────────────────────────────────────────
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: gradle
+
+      # ── Gradle cache ─────────────────────────────────────────────────────────
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # ── Permissions ──────────────────────────────────────────────────────────
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      # ── Inject build number ───────────────────────────────────────────────────
+      - name: Set build number
+        run: |
+          echo "BUILD_NUMBER=${{ github.run_number }}" >> $GITHUB_ENV
+          echo "GIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      # ── Keystore decode (optional) ────────────────────────────────────────────
+      - name: Decode keystore
+        if: ${{ github.event.inputs.sign_release == 'true' && secrets.KEYSTORE_FILE != '' }}
+        env:
+          KEYSTORE_FILE:  ${{ secrets.KEYSTORE_FILE }}
+          KEYSTORE_PASS:  ${{ secrets.KEYSTORE_PASS }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          KEY_PASS:       ${{ secrets.KEY_PASS }}
+        run: |
+          echo "$KEYSTORE_FILE" | base64 --decode > ${{ needs.validate.outputs.module }}/release.jks
+          cat >> local.properties <<EOF
+          signing.storeFile=release.jks
+          signing.storePassword=$KEYSTORE_PASS
+          signing.keyAlias=$KEYSTORE_ALIAS
+          signing.keyPassword=$KEY_PASS
+          EOF
+          echo "SIGNING_CONFIGURED=true" >> $GITHUB_ENV
+
+      # ── Build APK ────────────────────────────────────────────────────────────
+      - name: Build APK (${{ github.event.inputs.build_variant }})
+        if: ${{ github.event.inputs.build_type == 'apk' || github.event.inputs.build_type == 'both' }}
+        run: |
+          VARIANT="${{ github.event.inputs.build_variant }}"
+          TASK="assemble$(tr '[:lower:]' '[:upper:]' <<< ${VARIANT:0:1})${VARIANT:1}"
+          MODULE="${{ needs.validate.outputs.module }}"
+          ./gradlew ":${MODULE}:${TASK}" \
+            --no-daemon \
+            --stacktrace \
+            -PbuildNumber=${{ env.BUILD_NUMBER }} \
+            -PgitSha=${{ env.GIT_SHA }}
+
+      # ── Build AAB ────────────────────────────────────────────────────────────
+      - name: Build AAB (${{ github.event.inputs.build_variant }})
+        if: ${{ github.event.inputs.build_type == 'aab' || github.event.inputs.build_type == 'both' }}
+        run: |
+          VARIANT="${{ github.event.inputs.build_variant }}"
+          TASK="bundle$(tr '[:lower:]' '[:upper:]' <<< ${VARIANT:0:1})${VARIANT:1}"
+          MODULE="${{ needs.validate.outputs.module }}"
+          ./gradlew ":${MODULE}:${TASK}" \
+            --no-daemon \
+            --stacktrace \
+            -PbuildNumber=${{ env.BUILD_NUMBER }} \
+            -PgitSha=${{ env.GIT_SHA }}
+
+      # ── Upload APK ───────────────────────────────────────────────────────────
+      - name: Upload APK
+        if: ${{ (github.event.inputs.build_type == 'apk' || github.event.inputs.build_type == 'both') && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobixbuild-apk-${{ github.run_number }}
+          path: |
+            **/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ── Upload AAB ───────────────────────────────────────────────────────────
+      - name: Upload AAB
+        if: ${{ (github.event.inputs.build_type == 'aab' || github.event.inputs.build_type == 'both') && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobixbuild-aab-${{ github.run_number }}
+          path: |
+            **/build/outputs/bundle/**/*.aab
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ── Build summary ─────────────────────────────────────────────────────────
+      - name: Write MobixBuild summary
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          ICON="✅"
+          [[ "$STATUS" != "success" ]] && ICON="❌"
+
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          ## ${ICON} MobixBuild Report
+
+          | Field | Value |
+          |---|---|
+          | **Status** | \`${STATUS}\` |
+          | **Type** | \`${{ github.event.inputs.build_type }}\` |
+          | **Variant** | \`${{ github.event.inputs.build_variant }}\` |
+          | **Module** | \`${{ needs.validate.outputs.module }}\` |
+          | **Signed** | \`${{ github.event.inputs.sign_release }}\` |
+          | **Build #** | \`${{ github.run_number }}\` |
+          | **Commit** | \`${{ env.GIT_SHA }}\` |
+          | **Triggered by** | @${{ github.actor }} |
+
+          ### Artifacts
+          $(find . -name "*.apk" -o -name "*.aab" 2>/dev/null | head -10 | \
+            awk '{size=0; cmd="stat -c%s "$1; cmd | getline size; close(cmd); \
+            printf "- `%s` (%.1f MB)\n", $1, size/1048576}' || echo "_No artifacts found._")
+          EOF
