@@ -125,19 +125,23 @@ _extract_metadata() {
     PROJECT_DIR="$dir"
     PROJECT_NAME="$(basename "$dir")"
 
-    # Try to read applicationId from build.gradle
-    local app_gradle
+    # applicationId / versionName: module build file (Groovy or Kotlin DSL) first, then the
+    # SimpleTools app-factory file (simpletools.properties), where the identity lives for
+    # projects built from the shared template (the module file only holds the code namespace).
+    local app_gradle app_id="" version_name=""
     app_gradle=$(_find_app_gradle "$dir")
 
     if [[ -n "$app_gradle" && -f "$app_gradle" ]]; then
-        local app_id
         app_id=$(grep -oP 'applicationId\s*=?\s*["'"'"']\K[^"'"'"']+' "$app_gradle" | head -1 || true)
-        [[ -n "$app_id" ]] && _ap_log "applicationId: $app_id"
-
-        local version_name
         version_name=$(grep -oP 'versionName\s*=?\s*["'"'"']\K[^"'"'"']+' "$app_gradle" | head -1 || true)
-        [[ -n "$version_name" ]] && _ap_log "versionName: $version_name"
     fi
+    local props="$dir/simpletools.properties"
+    if [[ -f "$props" ]]; then
+        [[ -z "$app_id" ]] && app_id=$(grep -oP '^app\.applicationId\s*=\s*\K\S+' "$props" | head -1 || true)
+        [[ -z "$version_name" ]] && version_name=$(grep -oP '^app\.versionName\s*=\s*\K\S+' "$props" | head -1 || true)
+    fi
+    [[ -n "$app_id" ]] && _ap_log "applicationId: $app_id"
+    [[ -n "$version_name" ]] && _ap_log "versionName: $version_name"
 }
 
 # ─── Validate Gradle wrapper integrity ───────────────────────────────────────
