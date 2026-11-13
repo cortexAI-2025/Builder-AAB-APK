@@ -126,17 +126,16 @@ _extract_metadata() {
     PROJECT_NAME="$(basename "$dir")"
 
     # Try to read applicationId from build.gradle
-    local app_gradle="$dir/app/build.gradle"
-    [[ ! -f "$app_gradle" ]] && app_gradle=$(find "$dir" -maxdepth 4 -name "build.gradle" \
-        | xargs grep -l "applicationId" 2>/dev/null | head -1 || true)
+    local app_gradle
+    app_gradle=$(_find_app_gradle "$dir")
 
     if [[ -n "$app_gradle" && -f "$app_gradle" ]]; then
         local app_id
-        app_id=$(grep -oP 'applicationId\s+["'"'"']\K[^"'"'"']+' "$app_gradle" | head -1 || true)
+        app_id=$(grep -oP 'applicationId\s*=?\s*["'"'"']\K[^"'"'"']+' "$app_gradle" | head -1 || true)
         [[ -n "$app_id" ]] && _ap_log "applicationId: $app_id"
 
         local version_name
-        version_name=$(grep -oP 'versionName\s+["'"'"']\K[^"'"'"']+' "$app_gradle" | head -1 || true)
+        version_name=$(grep -oP 'versionName\s*=?\s*["'"'"']\K[^"'"'"']+' "$app_gradle" | head -1 || true)
         [[ -n "$version_name" ]] && _ap_log "versionName: $version_name"
     fi
 }
@@ -174,12 +173,17 @@ _validate_gradle_wrapper() {
 # ─── Resolve SDK versions from build.gradle ──────────────────────────────────
 _resolve_sdk_versions() {
     local dir="$1"
-    local app_gradle="$dir/app/build.gradle"
-    [[ ! -f "$app_gradle" ]] && return
+    local app_gradle
+    app_gradle=$(_find_app_gradle "$dir")
+    [[ -z "$app_gradle" || ! -f "$app_gradle" ]] && return
 
-    COMPILE_SDK=$(grep -oP 'compileSdk(Version)?\s+\K\d+' "$app_gradle" | head -1 || echo "34")
-    MIN_SDK=$(grep -oP 'minSdk(Version)?\s+\K\d+' "$app_gradle" | head -1 || echo "21")
-    TARGET_SDK=$(grep -oP 'targetSdk(Version)?\s+\K\d+' "$app_gradle" | head -1 || echo "34")
+    # Groovy ("compileSdk 36") and Kotlin DSL ("compileSdk = 36") are both accepted.
+    # Values missing from the module file (version catalog, convention plugin) fall back
+    # to gradle/libs.versions.toml, then to the historical defaults.
+    local toml="$dir/gradle/libs.versions.toml"
+    COMPILE_SDK=$(_sdk_value "$app_gradle" "$toml" compileSdk 34)
+    MIN_SDK=$(_sdk_value "$app_gradle" "$toml" minSdk 21)
+    TARGET_SDK=$(_sdk_value "$app_gradle" "$toml" targetSdk 34)
 
     export COMPILE_SDK MIN_SDK TARGET_SDK
     _ap_log "compileSdk=$COMPILE_SDK  minSdk=$MIN_SDK  targetSdk=$TARGET_SDK"
@@ -188,4 +192,24 @@ _resolve_sdk_versions() {
     if [[ "${SDK_PACKAGES[*]:-}" != *"platforms;android-${COMPILE_SDK}"* ]]; then
         SDK_PACKAGES+=("platforms;android-${COMPILE_SDK}")
     fi
+}
+
+# ─── Locate the application module's Gradle file (Groovy or Kotlin DSL) ───────
+_find_app_gradle() {
+    local dir="$1" f
+    for f in "$dir/app/build.gradle" "$dir/app/build.gradle.kts"; do
+        [[ -f "$f" ]] && { echo "$f"; return; }
+    done
+    find "$dir" -maxdepth 4 \( -name "build.gradle" -o -name "build.gradle.kts" \) -print0 2>/dev/null \
+        | xargs -0 grep -l "com.android.application\|applicationId" 2>/dev/null | head -1 || true
+}
+
+# ─── Read an SDK level: literal in module file, else version catalog, else default ─
+_sdk_value() {
+    local gradle="$1" toml="$2" key="$3" default="$4" v=""
+    v=$(grep -oP "${key}(Version)?\s*=?\s*(\(\s*)?\K\d+" "$gradle" 2>/dev/null | head -1 || true)
+    if [[ -z "$v" && -f "$toml" ]]; then
+        v=$(grep -oP "^${key}\s*=\s*\"\K\d+" "$toml" 2>/dev/null | head -1 || true)
+    fi
+    echo "${v:-$default}"
 }
