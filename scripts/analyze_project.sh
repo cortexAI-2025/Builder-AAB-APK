@@ -208,12 +208,25 @@ _find_app_gradle() {
         | xargs -0 grep -l "com.android.application\|applicationId" 2>/dev/null | head -1 || true
 }
 
+# ─── Strip full-line and trailing comments (Groovy/Kotlin "//", block "/* */" on one line, TOML "#") ─
+_strip_comments() {
+    sed -E -e 's@/\*[^*]*\*+([^/*][^*]*\*+)*/@@g' \
+           -e 's@^[[:space:]]*//.*$@@' \
+           -e 's@[[:space:]]//.*$@@' \
+           -e 's@^[[:space:]]*#.*$@@' "$1" 2>/dev/null || true
+}
+
 # ─── Read an SDK level: literal in module file, else version catalog, else default ─
+#   Accepts: compileSdk 36 | compileSdk = 36 | compileSdkVersion(36) | compileSdk { version = release(36) { ... } }
 _sdk_value() {
-    local gradle="$1" toml="$2" key="$3" default="$4" v=""
-    v=$(grep -oP "${key}(Version)?\s*=?\s*(\(\s*)?\K\d+" "$gradle" 2>/dev/null | head -1 || true)
+    local gradle="$1" toml="$2" key="$3" default="$4" v="" body=""
+    body=$(_strip_comments "$gradle")
+    v=$(printf '%s\n' "$body" | grep -oP "${key}(Version)?\s*=?\s*(\(\s*)?\K\d+" | head -1 || true)
+    if [[ -z "$v" && "$key" == "compileSdk" ]]; then
+        v=$(printf '%s\n' "$body" | grep -oP "version\s*=\s*release\(\s*\K\d+" | head -1 || true)
+    fi
     if [[ -z "$v" && -f "$toml" ]]; then
-        v=$(grep -oP "^${key}\s*=\s*\"\K\d+" "$toml" 2>/dev/null | head -1 || true)
+        v=$(_strip_comments "$toml" | grep -oP "^${key}\s*=\s*\"\K\d+" | head -1 || true)
     fi
     echo "${v:-$default}"
 }
