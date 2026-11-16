@@ -5,6 +5,7 @@ const multer          = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const path            = require('path');
 const fs              = require('fs');
+const { finalize } = require('./finalize');
 const { spawn }       = require('child_process');
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -51,6 +52,11 @@ setInterval(() => {
 
 // ─── Express app ──────────────────────────────────────────────────────────────
 const app = express();
+// Local single-owner console: expose through an authenticated reverse proxy only.
+app.use((req, res, next) => {
+  if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) return res.sendStatus(403);
+  next();
+});
 app.use(express.static(PUBLIC_DIR));
 
 // =============================================================================
@@ -70,11 +76,16 @@ app.post('/api/preview', upload.single('zip'), async (req, res) => {
   });
 
   try {
+    const checkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dual-preview-'));
+    try {
+      await execFileAsync('python3', [path.join(SCRIPTS_DIR, 'safe_zip.py'), zipPath, checkDir], {timeout:60_000, maxBuffer:1024*1024, env:{PATH:process.env.PATH}});
+    } finally { fs.rmSync(checkDir, {recursive:true, force:true}); }
     const info = await extractPreview(zipPath);
     res.json({ previewId, zipName, ...info });
   } catch (err) {
-    // Always return previewId so the build can still proceed
-    res.json({ previewId, zipName, error: String(err.message) });
+    previews.delete(previewId);
+    try { fs.unlinkSync(zipPath); } catch {}
+    res.status(400).json({error: 'Archive rejected or preview limits exceeded'});
   }
 });
 
@@ -99,15 +110,19 @@ app.post('/api/build', upload.single('zip'), (req, res) => {
     return res.status(400).json({ error: 'No ZIP file or previewId provided' });
   }
 
+  if ([...builds.values()].some(b => b.status === 'RUNNING')) return res.status(409).json({error: 'One build at a time'});
   const buildId   = uuidv4();
   const outputDir = path.join(OUTPUT_DIR, buildId);
-  const logPath   = path.join(outputDir, 'pipeline.log');
-  fs.mkdirSync(outputDir, { recursive: true });
+  const logPath   = path.join(UPLOAD_DIR, `${buildId}.log`);
+  fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+  if (process.getuid() === 0) fs.chownSync(outputDir, 1000, 1000);
+  else if (process.getuid() !== 1000) return res.status(503).json({error: 'Host workspace must be owned by uid 1000'});
+  fs.chmodSync(zipPath, 0o444);
 
   builds.set(buildId, {
     id: buildId, status: 'RUNNING',
     zipPath, zipName, outputDir, logPath,
-    apks: [], aabs: [], errors: [],
+    apks: [], aabs: [], errors: [], signingAuthorized: req.body?.authorizeSigning === 'true',
     startedAt: Date.now(), finishedAt: null,
     sseClients: new Set(),
   });
@@ -165,7 +180,7 @@ app.get('/api/build/:id/download/:filename', (req, res) => {
   const filename = path.basename(req.params.filename);
   const filePath = path.join(build.outputDir, filename);
 
-  if (!filePath.startsWith(build.outputDir) || !fs.existsSync(filePath))
+  if (!['SUCCESS', 'PARTIAL'].includes(build.status) || ![...build.apks, ...build.aabs].includes(filePath) || !fs.existsSync(filePath) || fs.lstatSync(filePath).isSymbolicLink())
     return res.status(404).json({ error: 'Artifact not found' });
 
   res.download(filePath, filename);
@@ -178,8 +193,8 @@ function _buildSummary(b) {
     : Math.round((Date.now()   - b.startedAt) / 1000);
   return {
     id: b.id, status: b.status, zipName: b.zipName,
-    apks: b.apks.map(f => ({ name: path.basename(f), size: _fileSize(f) })),
-    aabs: b.aabs.map(f => ({ name: path.basename(f), size: _fileSize(f) })),
+    apks: b.apks.map(f => ({ name: path.basename(f), size: _fileSize(f), sha256: b.verified?.find(a => a.name === path.basename(f))?.sha256, status: 'VERIFIED' })),
+    aabs: b.aabs.map(f => ({ name: path.basename(f), size: _fileSize(f), sha256: b.verified?.find(a => a.name === path.basename(f))?.sha256, status: 'VERIFIED' })),
     errors: b.errors, duration,
     startedAt: b.startedAt, finishedAt: b.finishedAt,
   };
@@ -201,7 +216,8 @@ function _broadcast(build, event) {
 }
 
 function _log(build, line) {
-  fs.appendFileSync(build.logPath, line + '\n');
+  if (fs.existsSync(build.logPath) && fs.statSync(build.logPath).size > 10*1024*1024) return;
+  fs.appendFileSync(build.logPath, line + '\n', {mode:0o600});
   _broadcast(build, { type: 'log', line });
 }
 
@@ -211,18 +227,40 @@ function _runBuild(buildId) {
   _log(build, `[Builder] Source: ${build.zipName}`);
   _log(build, '─'.repeat(60));
 
-  const env = {
-    ...process.env,
-    OUTPUT_DIR:     build.outputDir,
-    WORK_DIR:       `/tmp/android_build_${buildId}`,
-    ANDROID_HOME:   process.env.ANDROID_HOME   || `${process.env.HOME}/android-sdk`,
-    KEYSTORE_PATH:  process.env.KEYSTORE_PATH  || '',
-    KEYSTORE_ALIAS: process.env.KEYSTORE_ALIAS || '',
-    KEYSTORE_PASS:  process.env.KEYSTORE_PASS  || '',
+  // No API/Firebase/GitHub/signing credentials enter the untrusted process.
+  const containerName = `dual-build-${buildId}`;
+  const proc = spawn('docker', ['run', '--rm', '--name', containerName,
+    '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges:true', '--init',
+    '--user', '1000:1000',
+    '--memory=4g', '--memory-swap=4g', '--cpus=2', '--pids-limit=512',
+    '--ulimit', 'fsize=2147483648:2147483648', '--network=none',
+    '--tmpfs', '/tmp:size=2g,exec,mode=1777',
+    '--volume', `${path.resolve(build.zipPath)}:/input/project.zip:ro`,
+    '--volume', `${path.resolve(build.outputDir)}:/output:rw`,
+    '--env', 'BUILD_SANDBOX=true', '--env', 'STAGE_UNSIGNED_RELEASE=true', '--env', 'GRADLE_USER_HOME=/tmp/gradle',
+    '--env', 'HOME=/tmp/home', '--env', 'OUTPUT_DIR=/output',
+    process.env.BUILDER_IMAGE || 'android-builder:local', '/input/project.zip'],
+    { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH } });
+  let aborted = false;
+  const stop = () => {
+    aborted = true;
+    spawn('docker', ['rm', '--force', containerName], {stdio: 'ignore'}).on('error', () => {});
+    proc.kill('SIGTERM');
   };
-
-  const proc = spawn('bash', [path.join(SCRIPTS_DIR, 'build.sh'), build.zipPath], {
-    env, stdio: ['ignore', 'pipe', 'pipe'],
+  const timer = setTimeout(stop, 25 * 60 * 1000);
+  const diskTimer = setInterval(() => {
+    try {
+      const bytes = fs.readdirSync(build.outputDir).reduce((n, f) => n + fs.lstatSync(path.join(build.outputDir, f)).size, 0);
+      if (bytes > 4 * 1024 ** 3) stop();
+    } catch { stop(); }
+  }, 1000);
+  proc.on('error', () => {
+    clearTimeout(timer); clearInterval(diskTimer);
+    build.status = 'FAILED'; build.finishedAt = Date.now();
+    build.errors = ['Docker unavailable: isolated build was not started'];
+    _broadcast(build, {type: 'result', build: _buildSummary(build)});
+    build.sseClients.forEach(c => c.end()); build.sseClients.clear();
+    try { fs.unlinkSync(build.zipPath); } catch {}
   });
 
   const onLine = chunk =>
@@ -231,33 +269,25 @@ function _runBuild(buildId) {
   proc.stdout.on('data', onLine);
   proc.stderr.on('data', onLine);
 
-  proc.on('close', exitCode => {
+  proc.on('close', async exitCode => {
     _log(build, '─'.repeat(60));
     _log(build, `[Builder] Process exited (${exitCode})`);
 
+    clearTimeout(timer); clearInterval(diskTimer);
+    build.apks = []; build.aabs = [];
+    const rawDir = build.outputDir;
     try {
-      const files = fs.readdirSync(build.outputDir);
-      build.apks = files.filter(f => f.endsWith('.apk')).map(f => path.join(build.outputDir, f));
-      build.aabs = files.filter(f => f.endsWith('.aab')).map(f => path.join(build.outputDir, f));
-    } catch {}
-
-    try {
-      const logText = fs.readFileSync(build.logPath, 'utf8');
-      const m = logText.match(/\{[\s\S]*?"status"\s*:\s*"(SUCCESS|PARTIAL|FAILED)"[\s\S]*?\}/);
-      if (m) {
-        const r = JSON.parse(m[0]);
-        build.status = r.status;
-        build.errors = r.errors || [];
-        const resolveList = (list) => (list || []).filter(p => fs.existsSync(p));
-        const ra = resolveList(r.apk);  if (ra.length) build.apks = ra;
-        const rb = resolveList(r.aab);  if (rb.length) build.aabs = rb;
-      } else {
-        build.status = exitCode === 0
-          ? (build.aabs.length ? 'SUCCESS' : build.apks.length ? 'PARTIAL' : 'FAILED')
-          : 'FAILED';
-      }
-    } catch {
-      build.status = exitCode === 0 ? 'PARTIAL' : 'FAILED';
+      if (exitCode !== 0 || aborted) throw new Error('Build failed or interrupted');
+      const result = await finalize(build.outputDir, SCRIPTS_DIR, build.signingAuthorized);
+      build.outputDir = result.directory;
+      build.verified = result.verified;
+      build.apks = result.verified.filter(a => a.name.endsWith('.apk')).map(a => path.join(result.directory, a.name));
+      build.aabs = result.verified.filter(a => a.name.endsWith('.aab')).map(a => path.join(result.directory, a.name));
+      build.status = 'SUCCESS';
+    } catch (err) {
+      build.status = 'FAILED'; build.errors = [err.message]; build.apks = []; build.aabs = [];
+    } finally {
+      fs.rmSync(rawDir, {recursive:true, force:true});
     }
 
     build.finishedAt = Date.now();
@@ -277,8 +307,12 @@ function runCmd(cmd, args) {
   return new Promise(resolve => {
     const proc = spawn(cmd, args);
     const bufs = [];
-    proc.stdout.on('data', d => bufs.push(d));
-    proc.on('close', () => resolve(Buffer.concat(bufs).toString('utf8')));
+    let bytes = 0;
+    const timer = setTimeout(() => proc.kill('SIGKILL'), 10_000);
+    proc.once('close', () => clearTimeout(timer));
+    proc.once('error', () => clearTimeout(timer));
+    proc.stdout.on('data', d => { bytes += d.length; if(bytes > 4*1024*1024) proc.kill('SIGKILL'); else bufs.push(d); });
+    proc.on('close', code => resolve(code === 0 ? Buffer.concat(bufs).toString('utf8') : ''));
     proc.on('error', () => resolve(''));
   });
 }
@@ -287,8 +321,12 @@ function runCmdBin(cmd, args) {
   return new Promise(resolve => {
     const proc = spawn(cmd, args);
     const bufs = [];
-    proc.stdout.on('data', d => bufs.push(d));
-    proc.on('close', () => resolve(Buffer.concat(bufs)));
+    let bytes = 0;
+    const timer = setTimeout(() => proc.kill('SIGKILL'), 10_000);
+    proc.once('close', () => clearTimeout(timer));
+    proc.once('error', () => clearTimeout(timer));
+    proc.stdout.on('data', d => { bytes += d.length; if(bytes > 4*1024*1024) proc.kill('SIGKILL'); else bufs.push(d); });
+    proc.on('close', code => resolve(code === 0 ? Buffer.concat(bufs) : Buffer.alloc(0)));
     proc.on('error', () => resolve(Buffer.alloc(0)));
   });
 }
@@ -397,6 +435,6 @@ function _estimateBuildTime(sourceFiles, depCount) {
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, '127.0.0.1', () => {
   console.log(`\n  Android Builder UI  →  http://localhost:${PORT}\n`);
 });

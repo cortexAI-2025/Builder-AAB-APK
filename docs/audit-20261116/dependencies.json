@@ -1,0 +1,24 @@
+{
+  "web": {
+    "declared": {
+      "express": "^4.19.2",
+      "multer": "^2.1.1",
+      "uuid": "^9.0.1"
+    },
+    "has_lockfile": true
+  },
+  "webapp": {
+    "declared": {
+      "@octokit/rest": "^21.0.2",
+      "libsodium-wrappers": "^0.7.13",
+      "next": "^16.2.4",
+      "react": "^18.3.1",
+      "react-dom": "^18.3.1"
+    },
+    "has_lockfile": true
+  },
+  "advisory_scan": {
+    "status": "BLOCKED",
+    "reason": "Automatic approval review rejected npm audit because it transmits dependency metadata to the public registry. No CVE-completeness claim."
+  }
+}
