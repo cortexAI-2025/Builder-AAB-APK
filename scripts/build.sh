@@ -3,7 +3,10 @@
 # Android Build Pipeline — build.sh
 # Automated APK / AAB builder for GitHub-hosted Android projects
 # =============================================================================
+set +x
 set -euo pipefail
+umask 077
+SCRIPTS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─── Colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -16,7 +19,7 @@ die()  { echo -e "${RED}[FAIL]${RESET} $*" >&2; exit 1; }
 
 # ─── Defaults / overridable env ───────────────────────────────────────────────
 ZIP_FILE="${1:-}"
-WORK_DIR="${WORK_DIR:-/tmp/android_build}"
+WORK_DIR=""  # assigned only by mktemp; never delete a caller-selected directory
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/android_output}"
 KEYSTORE_PATH="${KEYSTORE_PATH:-}"
 KEYSTORE_ALIAS="${KEYSTORE_ALIAS:-}"
@@ -35,7 +38,12 @@ LOGS_SUMMARY=""
 cleanup() {
     local end_time; end_time=$(date +%s)
     local duration=$(( end_time - START_TIME ))
+    if [[ "$BUILD_STATUS" == FAILED ]]; then
+        APK_PATHS=(); AAB_PATHS=()
+        find "$OUTPUT_DIR" -maxdepth 1 -type f \( -name '*.apk' -o -name '*.aab' -o -name 'verified.json' \) -delete 2>/dev/null || true
+    fi
     emit_json "$duration"
+    [[ -z "${WORK_DIR:-}" ]] || rm -rf -- "$WORK_DIR"
 }
 trap cleanup EXIT
 
@@ -51,16 +59,17 @@ emit_json() {
     err_json=$(printf '%s\n' "${ERRORS[@]+"${ERRORS[@]}"}" \
                | python3 -c "import sys,json; print(json.dumps([l.rstrip() for l in sys.stdin if l.strip()]))")
 
-    python3 - <<EOF
-import json, sys
-data = {
-    "status":       "$BUILD_STATUS",
-    "apk":          $apk_json,
-    "aab":          $aab_json,
-    "logs_summary": "$LOGS_SUMMARY",
-    "errors":       $err_json,
-    "build_duration_seconds": $duration,
-    "project_name": "$(basename "${ZIP_FILE:-unknown}" .zip)"
+    BUILD_STATUS="$BUILD_STATUS" APK_JSON="$apk_json" AAB_JSON="$aab_json" ERR_JSON="$err_json" \
+    LOGS_SUMMARY="$LOGS_SUMMARY" BUILD_DURATION="$duration" ZIP_FILE="$ZIP_FILE" python3 - <<'EOF'
+import json, os
+print(json.dumps({
+    "status": os.environ['BUILD_STATUS'],
+    "apk": json.loads(os.environ['APK_JSON']), "aab": json.loads(os.environ['AAB_JSON']),
+    "logs_summary": os.environ['LOGS_SUMMARY'], "errors": json.loads(os.environ['ERR_JSON']),
+    "build_duration_seconds": int(os.environ['BUILD_DURATION']),
+    "project_name": os.path.basename(os.environ['ZIP_FILE'])
+}, indent=2))
+EOF
 }
 print(json.dumps(data, indent=2))
 EOF
@@ -75,7 +84,11 @@ preflight() {
     [[ -z "$ZIP_FILE" ]] && die "Usage: $0 <path-to-project.zip>"
     [[ -f "$ZIP_FILE" ]] || die "ZIP not found: $ZIP_FILE"
 
-    mkdir -p "$WORK_DIR" "$OUTPUT_DIR"
+    [[ -f /.dockerenv && "${BUILD_SANDBOX:-}" == true ]] || die "Run via the isolated Docker launcher; host execution is disabled"
+    [[ -z "$KEYSTORE_PATH" && -z "$KEYSTORE_PASS" && -z "${KEY_PASS:-}" ]] || die "Signing keys must stay outside the untrusted build sandbox"
+    WORK_DIR=$(mktemp -d /tmp/android-build-XXXXXX)
+    mkdir -p "$OUTPUT_DIR"
+    [[ -z "$(find "$OUTPUT_DIR" -maxdepth 1 -name '*.apk' -o -name '*.aab')" ]] || die "Output directory must contain no previous artifacts"
 
     for cmd in unzip java python3; do
         command -v "$cmd" &>/dev/null || die "Required tool missing: $cmd"
@@ -90,9 +103,7 @@ preflight() {
 extract_and_analyse() {
     log "Phase 1 — Extracting archive: $ZIP_FILE"
 
-    rm -rf "$WORK_DIR"
-    mkdir -p "$WORK_DIR"
-    unzip -q "$ZIP_FILE" -d "$WORK_DIR"
+    python3 "$SCRIPTS_DIR/safe_zip.py" "$ZIP_FILE" "$WORK_DIR"
 
     # Flatten single-root directories (GitHub zips add a repo-name/ wrapper)
     local entries=( "$WORK_DIR"/* )
@@ -103,9 +114,11 @@ extract_and_analyse() {
     fi
     log "Project root: $PROJECT_DIR"
 
+    bash "$SCRIPTS_DIR/prepare_project.sh" "$PROJECT_DIR"
+    if [[ -f "$PROJECT_DIR/package.json" && -d "$PROJECT_DIR/android" ]]; then PROJECT_DIR="$PROJECT_DIR/android"; fi
     log "Phase 1 — Analysing project structure"
     # shellcheck source=./analyze_project.sh
-    source "$(dirname "$0")/analyze_project.sh"
+    source "$SCRIPTS_DIR/analyze_project.sh"
     analyze_project "$PROJECT_DIR"
 }
 
@@ -115,7 +128,7 @@ extract_and_analyse() {
 setup_environment() {
     log "Phase 2 — Setting up Android build environment"
     # shellcheck source=./setup_env.sh
-    source "$(dirname "$0")/setup_env.sh"
+    source "$SCRIPTS_DIR/setup_env.sh"
     setup_android_env
 }
 
@@ -135,7 +148,7 @@ run_build() {
             -PANDROID_HOME="$ANDROID_HOME" \
             --no-daemon --stacktrace 2>&1 \
         | tee "$OUTPUT_DIR/clean.log"; then
-        warn "Clean step had warnings (continuing)"
+        die "Gradle clean failed; inspect clean.log"
     fi
 
     # ── APK Debug ─────────────────────────────────────────────────────────────
@@ -149,14 +162,7 @@ run_build() {
     if [[ $apk_rc -ne 0 ]]; then
         ERRORS+=("assembleDebug failed (exit $apk_rc)")
         parse_gradle_errors "$OUTPUT_DIR/assembleDebug.log"
-        apply_auto_fixes "$OUTPUT_DIR/assembleDebug.log"
-
-        log "Retrying assembleDebug after auto-fix…"
-        timeout "$BUILD_TIMEOUT" ./gradlew assembleDebug \
-                -PANDROID_HOME="$ANDROID_HOME" \
-                --no-daemon --stacktrace 2>&1 \
-            | tee "$OUTPUT_DIR/assembleDebug_retry.log" \
-            || die "assembleDebug failed after auto-fix. See $OUTPUT_DIR/assembleDebug_retry.log"
+        die "assembleDebug failed. See assembleDebug.log"
     fi
 
     collect_apks
@@ -170,9 +176,8 @@ run_build() {
         | tee "$OUTPUT_DIR/bundleRelease.log" || aab_rc=$?
 
     if [[ $aab_rc -ne 0 ]]; then
-        warn "bundleRelease failed — falling back to debug APK only."
-        ERRORS+=("bundleRelease failed (exit $aab_rc) — debug APK only")
-        BUILD_STATUS="PARTIAL"
+        ERRORS+=("bundleRelease failed (exit $aab_rc)")
+        die "Both APK and AAB are required"
     else
         collect_aabs
     fi
@@ -184,11 +189,12 @@ collect_apks() {
 
     while IFS= read -r -d '' apk; do
         local dest="$OUTPUT_DIR/$(basename "$apk")"
+        [[ ! -e "$dest" ]] || die "Duplicate APK basename"
         cp "$apk" "$dest"
         local size; size=$(du -sh "$dest" | cut -f1)
         APK_PATHS+=("$dest")
         ok "APK: $dest  ($size)"
-    done < <(find "$PROJECT_DIR" -path "*/build/outputs/apk/*/*.apk" -print0 2>/dev/null)
+    done < <(find "$PROJECT_DIR" -type f -path "*/build/outputs/apk/*/*.apk" ! -path "*/androidTest/*" -print0 2>/dev/null)
 
     [[ ${#APK_PATHS[@]} -eq 0 ]] && die "No APK found after assembleDebug."
 }
@@ -196,11 +202,12 @@ collect_apks() {
 collect_aabs() {
     while IFS= read -r -d '' aab; do
         local dest="$OUTPUT_DIR/$(basename "$aab")"
+        [[ ! -e "$dest" ]] || die "Duplicate AAB basename"
         cp "$aab" "$dest"
         local size; size=$(du -sh "$dest" | cut -f1)
         AAB_PATHS+=("$dest")
         ok "AAB: $dest  ($size)"
-    done < <(find "$PROJECT_DIR" -path "*/build/outputs/bundle/*/*.aab" -print0 2>/dev/null)
+    done < <(find "$PROJECT_DIR" -type f -path "*/build/outputs/bundle/*/*.aab" -print0 2>/dev/null)
 }
 
 # =============================================================================
@@ -253,21 +260,16 @@ apply_auto_fixes() {
 sign_artifacts() {
     log "Phase 5 — Signing artifacts"
 
-    if [[ -z "$KEYSTORE_PATH" ]]; then
-        warn "No keystore provided — skipping signing."
+    [[ ${#APK_PATHS[@]} -gt 0 && ${#AAB_PATHS[@]} -gt 0 ]] || die "Missing APK or AAB"
+    if [[ "${STAGE_UNSIGNED_RELEASE:-}" == true ]]; then
+        # Private staging only. The web coordinator seals/signs/verifies outputs
+        # after this untrusted container exits; these files are never downloads.
         return
     fi
-
-    [[ -f "$KEYSTORE_PATH" ]] || { warn "Keystore not found at $KEYSTORE_PATH — skipping."; return; }
-
-    source "$(dirname "$0")/sign_artifacts.sh"
-
-    for aab in "${AAB_PATHS[@]+"${AAB_PATHS[@]}"}"; do
-        sign_aab "$aab"
-    done
-    for apk in "${APK_PATHS[@]+"${APK_PATHS[@]}"}"; do
-        sign_apk "$apk"
-    done
+    # Gradle runs without access to signing credentials. An unsigned bundle is
+    # deliberately withheld until a separate trusted signing stage is configured.
+    python3 "$SCRIPTS_DIR/verify_artifacts.py" "${APK_PATHS[@]}" "${AAB_PATHS[@]}" > "$OUTPUT_DIR/verified.json" \
+        || die "Artifact signature/structure verification failed; delivery blocked"
 }
 
 # =============================================================================
@@ -275,7 +277,7 @@ sign_artifacts() {
 # =============================================================================
 finalise() {
     if [[ ${#AAB_PATHS[@]} -gt 0 && ${#APK_PATHS[@]} -gt 0 ]]; then
-        BUILD_STATUS="SUCCESS"
+        if [[ "${STAGE_UNSIGNED_RELEASE:-}" == true ]]; then BUILD_STATUS="STAGED"; else BUILD_STATUS="SUCCESS"; fi
     elif [[ ${#APK_PATHS[@]} -gt 0 ]]; then
         [[ "$BUILD_STATUS" != "PARTIAL" ]] && BUILD_STATUS="PARTIAL"
     else

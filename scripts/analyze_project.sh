@@ -92,9 +92,7 @@ _check_build_readiness() {
     if [[ ! -d "$dir/app" ]]; then
         _ap_warn "No 'app' module at root — scanning for module directories..."
         local app_mod
-        app_mod=$(find "$dir" -maxdepth 3 -name "build.gradle" \
-                  | xargs -I{} dirname {} \
-                  | grep -v "^$dir$" | head -1 || true)
+        app_mod=$(_find_app_gradle "$dir")
         if [[ -z "$app_mod" ]]; then
             missing+=("app module")
         else
@@ -142,6 +140,7 @@ _extract_metadata() {
     fi
     [[ -n "$app_id" ]] && _ap_log "applicationId: $app_id"
     [[ -n "$version_name" ]] && _ap_log "versionName: $version_name"
+    return 0
 }
 
 # ─── Validate Gradle wrapper integrity ───────────────────────────────────────
@@ -161,16 +160,7 @@ _validate_gradle_wrapper() {
 
     # Ensure the JAR is present
     if [[ ! -f "$dir/gradle/wrapper/gradle-wrapper.jar" ]]; then
-        _ap_warn "gradle-wrapper.jar missing — attempting to restore from Gradle cache."
-        local cached_jar
-        cached_jar=$(find "$HOME/.gradle/wrapper/dists" -name "gradle-wrapper.jar" \
-                     -print -quit 2>/dev/null || true)
-        if [[ -n "$cached_jar" ]]; then
-            cp "$cached_jar" "$dir/gradle/wrapper/gradle-wrapper.jar"
-            _ap_log "Restored gradle-wrapper.jar from cache."
-        else
-            _ap_warn "Could not restore gradle-wrapper.jar — build may fail."
-        fi
+        _ap_die "gradle-wrapper.jar missing — provide the wrapper matching the project"
     fi
 }
 

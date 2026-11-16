@@ -403,6 +403,7 @@
     </div>
 
     <div class="build-area">
+      <label style="display:block;margin:12px 0"><input type="checkbox" id="authorize-signing"> Authorize signing this AAB with the key configured on this machine</label>
       <button class="btn-build" id="btn-build" disabled>
         <span class="spinner"></span>
         <span id="btn-label">&#9654;&nbsp; Build</span>
@@ -529,6 +530,7 @@ async function startBuild() {
   setStatus('RUNNING');
 
   const form = new FormData();
+  form.append('authorizeSigning', String(document.getElementById('authorize-signing').checked));
   form.append('zip', selectedFile);
 
   let res;
@@ -621,6 +623,7 @@ function artifactEl(artifact, type, id) {
     <div class="artifact-info">
       <div class="artifact-name">${escHtml(name)}</div>
       <div class="artifact-meta"><span class="tag ${type}">${type.toUpperCase()}</span>${escHtml(label)}${size ? ' &middot; ' + escHtml(size) : ''}</div>
+      <div class="artifact-meta">${escHtml(artifact.status || "PENDING")} · SHA-256: ${escHtml(artifact.sha256 || "unavailable")}</div>
     </div>
     <a class="btn-download" href="${href}" download="${escHtml(name)}">
       &#8595; Download

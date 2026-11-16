@@ -1,0 +1,19 @@
+test_groovy_sdk_literals (test_analysis.AnalysisTests.test_groovy_sdk_literals) ... ok
+test_kotlin_custom_module_without_literal_version (test_analysis.AnalysisTests.test_kotlin_custom_module_without_literal_version) ... ok
+test_bomb (test_security.ArchiveTests.test_bomb) ... ok
+test_duplicate (test_security.ArchiveTests.test_duplicate) ... /opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/zipfile/__init__.py:1625: UserWarning: Duplicate name: 'a'
+  return self._open_to_write(zinfo, force_zip64=force_zip64)
+ok
+test_special (test_security.ArchiveTests.test_special) ... ok
+test_symlink (test_security.ArchiveTests.test_symlink) ... ok
+test_traversal (test_security.ArchiveTests.test_traversal) ... ok
+test_valid (test_security.ArchiveTests.test_valid) ... ok
+test_fake_apk_verifier_failure_is_fatal (test_verification.VerificationTests.test_fake_apk_verifier_failure_is_fatal) ... ok
+test_signed_marker_cannot_replace_jarsigner_verification (test_verification.VerificationTests.test_signed_marker_cannot_replace_jarsigner_verification) ... ok
+test_signing_helper_requires_authorization (test_verification.VerificationTests.test_signing_helper_requires_authorization) ... ok
+test_unsigned_bundle_blocked_before_external_verifier (test_verification.VerificationTests.test_unsigned_bundle_blocked_before_external_verifier) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.067s
+
+OK

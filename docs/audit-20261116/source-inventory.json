@@ -1,0 +1,10 @@
+{
+  "date": "2026-11-16",
+  "default_ref": "refs/remotes/origin/claude/android-build-automation-aL60M",
+  "working_base_sha": "b0039c2278f3492934608cfe8dac6d052bc48bc9",
+  "branches": [
+    "origin 922ae5f3359692a3a35f1b2f69b878c6a97c2364 2026-04-19 08:07:23 +0000 fix: remove secrets context from if condition in mobixbuild.yml",
+    "origin/claude/android-build-automation-aL60M 922ae5f3359692a3a35f1b2f69b878c6a97c2364 2026-04-19 08:07:23 +0000 fix: remove secrets context from if condition in mobixbuild.yml",
+    "origin/feat/kotlin-dsl-support b0039c2278f3492934608cfe8dac6d052bc48bc9 2026-11-13 14:00:45 +0100 fix(analyze): ignore commented SDK lines and read compileSdk { version = release(N) }"
+  ]
+}

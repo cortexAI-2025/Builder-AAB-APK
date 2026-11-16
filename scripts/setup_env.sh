@@ -23,25 +23,14 @@ _die()  { echo -e "${RED:-}[setup_env FAIL]${RESET:-} $*" >&2; exit 1; }
 
 # =============================================================================
 setup_android_env() {
-    _log "Checking Java installation..."
-    _ensure_java
-
+    command -v java >/dev/null || _die "JDK missing in builder image"
     ANDROID_HOME="${ANDROID_HOME:-$DEFAULT_ANDROID_HOME}"
-    export ANDROID_HOME
-    export ANDROID_SDK_ROOT="$ANDROID_HOME"
-    export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
-
-    _log "ANDROID_HOME=$ANDROID_HOME"
-
-    if [[ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]]; then
-        _log "sdkmanager already present — skipping download."
-    else
-        _install_cmdline_tools
-    fi
-
-    _accept_licenses
-    _install_sdk_packages
-    _verify_sdk
+    export ANDROID_HOME ANDROID_SDK_ROOT="$ANDROID_HOME"
+    export PATH="$ANDROID_HOME/build-tools/34.0.0:$ANDROID_HOME/platform-tools:$PATH"
+    [[ -d "$ANDROID_HOME/platforms/android-${COMPILE_SDK:-34}" ]] || _die "Required Android platform absent from image"
+    command -v apksigner >/dev/null || _die "apksigner missing in image"
+    command -v jarsigner >/dev/null || _die "jarsigner missing in image"
+    [[ -f "${BUNDLETOOL_JAR:-}" ]] || _die "BUNDLETOOL_JAR missing in image"
 }
 
 # ─── Java check / install ─────────────────────────────────────────────────────

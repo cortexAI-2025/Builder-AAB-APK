@@ -1,0 +1,11 @@
+✔ forged manifest and symlink cannot authorize delivery (15.648231ms)
+✔ independent trusted verifier receives sealed copies and no configured signing passwords without consent (59.321452ms)
+✔ HTTP console rejects cross-origin/unsafe ZIPs and never serves failed artifacts (345.087345ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 525.785485

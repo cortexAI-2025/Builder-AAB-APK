@@ -58,11 +58,14 @@ RUN yes | sdkmanager --sdk_root="${ANDROID_HOME}" --licenses > /dev/null 2>&1 ||
         "platforms;android-33" \
         "build-tools;34.0.0" \
         "build-tools;33.0.2" \
-        "platform-tools" 2>&1 \
-    | grep -v "^[#=]" || true
+        "platform-tools"
 
 # ─── Copy pipeline scripts ────────────────────────────────────────────────────
 WORKDIR /pipeline
+# Supply a reviewed bundletool jar; absence fails the image build.
+COPY vendor/bundletool.jar /opt/bundletool.jar
+ENV BUNDLETOOL_JAR=/opt/bundletool.jar
+ENV BUILD_SANDBOX=true
 COPY scripts/ ./scripts/
 RUN chmod +x scripts/*.sh
 

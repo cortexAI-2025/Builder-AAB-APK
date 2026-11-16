@@ -3,3 +3,8 @@ tmp/
 *.log
 webapp/.next/
 webapp/next-env.d.ts
+
+__pycache__/
+*.pyc
+*.tsbuildinfo
+vendor/*.jar
